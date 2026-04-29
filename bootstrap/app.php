@@ -3,6 +3,8 @@
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Validation\ValidationException;
+use Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -12,8 +14,22 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        $middleware->api(prepend: [
+            EnsureFrontendRequestsAreStateful::class,
+            \App\Http\Middleware\RequestLoggingMiddleware::class,
+        ]);
+
+        $middleware->alias([
+            'role' => \App\Http\Middleware\RequireRole::class,
+            'api.version' => \App\Http\Middleware\EnsureApiVersionHeader::class,
+            'access.token' => \App\Http\Middleware\EnsureAccessTokenAbility::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        //
+        $exceptions->render(function (ValidationException $exception) {
+            return response()->json([
+                'status' => 'error',
+                'message' => $exception->getMessage(),
+            ], 422);
+        });
     })->create();

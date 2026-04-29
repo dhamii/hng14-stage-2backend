@@ -1,66 +1,131 @@
-# Profiles API
+# Insighta Labs+ Stage 3
 
-This project contains a RESTful API for managing user profiles, including a rule-based natural language query parser.
+Stage 3 extends the existing Stage 2 backend with secure authentication, RBAC, export/create workflows, CLI tooling, and a web portal scaffold while preserving filtering, sorting, pagination, and natural-language search.
 
-## Natural Language Query Parsing (`/api/profiles/search`)
+## Architecture
 
-The search endpoint accepts natural language queries via the `q` parameter and converts them into precise filters using a rule-based parsing engine.
+- `backend` (this Laravel app): API, auth, RBAC, rate limiting, logging, profile ingestion/search/export.
+- `cli/`: globally installable Node.js CLI (`insighta`) using OAuth PKCE + local callback.
+- `web/`: lightweight Express + EJS portal scaffold with CSRF middleware and cookie support.
 
-### Approach & Parsing Logic
-The `QueryParser` service processes plain English text to identify supported attributes and map them to database filters. Its core mechanism relies on finding specific patterns and keywords within the query string.
-The parser does **not** use AI or LLMs. It is entirely deterministic and relies on predefined regex and string matching rules.
+## Authentication Flow (GitHub OAuth + PKCE)
 
-### Supported Keywords and Mappings
+1. Client generates PKCE values (`code_verifier`, `code_challenge`).
+2. Client calls `GET /api/auth/github` with `code_challenge` and desired local `redirect_uri`.
+3. Backend stores OAuth state and redirects to GitHub authorize URL.
+4. GitHub redirects to backend callback `GET /api/auth/github/callback`.
+5. Backend validates PKCE challenge, fetches GitHub user, creates/updates local user, issues tokens:
+   - Access token: 3 minutes (`access` ability)
+   - Refresh token: 5 minutes (`refresh` ability)
+6. `POST /api/auth/refresh` rotates refresh token (old one invalidated).
+7. `POST /api/auth/logout` invalidates refresh token.
 
-1. **Gender Patterns:**
-   - **Keywords:** `male`, `males`, `female`, `females`
-   - **Mapping:** Translates directly to `gender=male` or `gender=female`.
+## Token Lifecycle
 
-2. **Age Groups:**
-   - **Keywords:** `child`, `teenager`, `adult`, `senior`
-   - **Mapping:** Translates to the exact `age_group` column value.
+- Access token is required for all `/api/profiles*` calls.
+- Access tokens are short-lived and should be auto-refreshed by client.
+- Refresh tokens are one-time rotation tokens (old invalidated on refresh).
+- Logout deletes refresh token and ends session continuity.
 
-3. **"Young" Alias:**
-   - **Keywords:** `young`
-   - **Mapping:** Internally maps to an age range, setting `min_age=16` and `max_age=24`. It is not stored as an age group but treated as an age constraint.
+## Role Enforcement
 
-4. **Age Boundaries:**
-   - **Keywords:** `above X`, `over X`, `X and above`
-   - **Mapping:** Sets `min_age=X`.
-   - **Keywords:** `below X`, `under X`, `less than X`
-   - **Mapping:** Sets `max_age=X`.
+- Role field exists on `users` (`admin` or `analyst`).
+- `analyst`: read-only access.
+- `admin`: can create and delete profiles.
+- RBAC is centralized via middleware (`role:*`) on route groups, not scattered in controller logic.
 
-5. **Countries:**
-   - **Keywords:** `from [country_name]`
-   - **Mapping:** Looks up `[country_name]` in a predefined map (`nigeria`, `angola`, `kenya`, `benin`, `ghana`, `south africa`, `egypt`) and translates it to its 2-letter ISO code (`country_id=NG`, etc.).
+## API Requirements
 
-### How the Logic Works
-- The query string is converted to lowercase.
-- Independent rule sets (Regex, `str_contains`) are evaluated sequentially.
-- If a match is found for a specific attribute, the corresponding filter (e.g., `gender`, `min_age`, `country_id`) is appended to an array.
-- The resulting filter array is then merged into the original request instance, allowing the standard `index` controller logic to apply standard Eloquent scope methods based on the generated keys.
-- If no predefined rules match, it throws a `400 Bad Request` with the message "Unable to interpret query".
+- All profile endpoints require `X-API-Version: 1`, enforced by middleware.
+- Standardized error format:
+  - `{"status":"error","message":"..."}`
+- Pagination response includes:
+  - `page`, `limit`, `total`, `total_pages`, `links` (`self`, `next`, `prev`)
 
----
+## Endpoints
 
-## Limitations and Edge Cases
+- `GET /api/auth/github`
+- `GET /api/auth/github/callback`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `GET /api/profiles`
+- `GET /api/profiles/search?q=...`
+- `POST /api/profiles` (admin only)
+- `DELETE /api/profiles/{profile}` (admin only)
+- `GET /api/profiles/export?format=csv`
 
-Because the parser is strictly rule-based, it comes with several limitations:
+## Natural Language Search Approach
 
-1. **Complex Boolean Logic (AND/OR/NOT):**
-   - The parser assumes all identified criteria are combined with an implicit `AND`.
-   - It cannot handle exclusionary logic (e.g., "not from Nigeria" or "males except adults").
-   - It cannot handle OR conditions smoothly (e.g., "males or females from Kenya" will likely just apply the last parsed gender). 
-   - A query like "male and female teenagers above 17" only applies the last matching gender (female) or might fail depending on regex order, though age group (teenager) and boundary (`min_age=17`) apply correctly.
+Natural-language search remains rule-based (`App\Services\QueryParser`) and deterministic:
+- Regex/keyword matching for gender, age groups, age boundaries, and country mappings.
+- Parsed filters are merged into the same `index` query pipeline, so filtering/sorting/pagination semantics remain consistent between normal list and NLP search.
 
-2. **Vocabulary Restraint:**
-   - Synonyms are not handled unless explicitly programmed. For example, "boys" or "guys" will not evaluate to `gender=male`.
-   - Words like "aged", "years old", or complex sentence structures are ignored.
+## Rate Limiting and Logging
 
-3. **Country Name Parsing:**
-   - Only a hardcoded dictionary of countries is supported. If a country is not in the `countryMap`, the "from X" query fails to map a `country_id`.
-   - Misspellings or abbreviations (e.g., "Naija" or "US") are not recognized.
+- `/api/auth/*`: `10 req/min` per IP.
+- Other protected API routes: `60 req/min` per authenticated user.
+- Request logging middleware records:
+  - HTTP method
+  - endpoint path
+  - status code
+  - response time (ms)
 
-4. **Multiple Age Boundaries:**
-   - If a query contains multiple identical boundaries (e.g., "above 20 and above 30"), it will overwrite the previous mapping, using only one boundary.
-   - The alias "young" sets its own `min_age` and `max_age`. If combined with "above 18" ("young males above 18"), it can result in conflicting constraints depending on the execution order.
+## CLI Usage
+
+Install globally from `cli/`:
+
+```bash
+cd cli
+npm install
+npm link
+```
+
+Commands:
+- `insighta login`
+- `insighta logout`
+- `insighta whoami`
+- `insighta profiles list`
+- `insighta profiles get <id>`
+- `insighta profiles search "<query>"`
+- `insighta profiles create "<name>"`
+- `insighta profiles export --format csv`
+
+Credentials are stored at `~/.insighta/credentials.json`.
+
+## Web Portal
+
+From `web/`:
+
+```bash
+npm install
+npm run dev
+```
+
+Pages:
+- `/login`
+- `/dashboard`
+- `/profiles`
+- `/profiles/:id`
+- `/search`
+- `/account`
+
+CSRF middleware is enabled and designed for cookie-backed auth integration.
+
+## Environment Variables
+
+Required backend variables:
+
+- `GITHUB_CLIENT_ID`
+- `GITHUB_CLIENT_SECRET`
+- `GITHUB_CALLBACK_URL`
+- `APP_URL`
+
+Optional client variables:
+- `INSIGHTA_API_BASE_URL` (CLI + web)
+
+## CI
+
+GitHub Actions workflow at `.github/workflows/ci.yml` runs:
+- Backend tests
+- CLI lint check
+- Web build smoke check

@@ -2,25 +2,37 @@
 
 namespace Tests\Feature;
 
+use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Foundation\Testing\WithFaker;
 use Tests\TestCase;
 
 class ProfileApiTest extends TestCase
 {
-    // use RefreshDatabase;
+    use RefreshDatabase;
+
+    private User $analyst;
+    private string $accessToken;
 
     protected function setUp(): void
     {
         parent::setUp();
-        \App\Models\Profile::truncate();
+        $this->analyst = User::factory()->create(['role' => 'analyst']);
+        $this->accessToken = $this->analyst->createToken('test-access', ['access'], now()->addMinutes(3))->plainTextToken;
+    }
+
+    private function headers(): array
+    {
+        return [
+            'Authorization' => "Bearer {$this->accessToken}",
+            'X-API-Version' => '1',
+        ];
     }
 
     public function test_get_all_profiles()
     {
         \App\Models\Profile::factory()->count(15)->create();
 
-        $response = $this->get('/api/profiles');
+        $response = $this->get('/api/profiles', $this->headers());
 
         $response->assertStatus(200)
                  ->assertJsonStructure([
@@ -28,6 +40,8 @@ class ProfileApiTest extends TestCase
                      'page',
                      'limit',
                      'total',
+                     'total_pages',
+                     'links' => ['self', 'next', 'prev'],
                      'data' => [
                          '*' => ['id', 'name', 'gender', 'age', 'country_id']
                      ]
@@ -39,7 +53,7 @@ class ProfileApiTest extends TestCase
         \App\Models\Profile::factory()->create(['gender' => 'male', 'age' => 25, 'country_id' => 'NG']);
         \App\Models\Profile::factory()->create(['gender' => 'female', 'age' => 30, 'country_id' => 'US']);
 
-        $response = $this->get('/api/profiles?gender=male&country_id=NG');
+        $response = $this->get('/api/profiles?gender=male&country_id=NG', $this->headers());
 
         $response->assertStatus(200);
         $this->assertEquals(1, count($response->json('data')));
@@ -51,7 +65,7 @@ class ProfileApiTest extends TestCase
         \App\Models\Profile::factory()->create(['gender' => 'male', 'age' => 20, 'country_id' => 'NG']);
         \App\Models\Profile::factory()->create(['gender' => 'female', 'age' => 30, 'country_id' => 'NG']);
 
-        $response = $this->get('/api/profiles/search?q=young males from nigeria');
+        $response = $this->get('/api/profiles/search?q=young males from nigeria', $this->headers());
 
         $response->assertStatus(200);
         $data = $response->json('data');
@@ -66,12 +80,25 @@ class ProfileApiTest extends TestCase
 
     public function test_nlp_search_uninterpretable_query()
     {
-        $response = $this->get('/api/profiles/search?q=extraterrestrials from mars');
+        $response = $this->get('/api/profiles/search?q=extraterrestrials from mars', $this->headers());
 
         $response->assertStatus(400)
                  ->assertJson([
                      'status' => 'error',
                      'message' => 'Unable to interpret query'
                  ]);
+    }
+
+    public function test_profiles_require_api_version_header(): void
+    {
+        $response = $this->get('/api/profiles', [
+            'Authorization' => "Bearer {$this->accessToken}",
+        ]);
+
+        $response->assertStatus(400)
+            ->assertJson([
+                'status' => 'error',
+                'message' => 'Missing or invalid X-API-Version header',
+            ]);
     }
 }
